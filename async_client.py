@@ -6,7 +6,10 @@ async def receive_messages(websocket):
     try:
         while True:
             message = await websocket.recv()
-            print(f"\n{'':<60}{message}")
+            print()
+            print('Response from bot:')
+            print(message)
+            print()
     except websockets.exceptions.ConnectionClosedOK:
         print("\nWebSocket connection closed.")
 

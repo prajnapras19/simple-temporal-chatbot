@@ -3,8 +3,6 @@ from temporalio.client import Client
 import websockets
 import uuid
 
-
-next_client_id = 1
 clients = {}
 
 async def handle_client(websocket, path):
@@ -14,12 +12,12 @@ async def handle_client(websocket, path):
         query_params = query_string.split("&")
         source_client_id = query_params[0].split("=")[1]
 
-    global next_client_id
-    client_id = uuid.uuid4()
+    client_id = str(uuid.uuid4())
 
+    global clients
     clients[client_id] = websocket
+
     print(f"Client {client_id} connected.")
-    workflow_id = f"chat-workflow-{client_id}"
 
     try:
         while True:
@@ -27,16 +25,13 @@ async def handle_client(websocket, path):
             print(f"Received message from client {client_id}: {message}")
 
             if source_client_id:
-                ws_client = None
-                for c in clients.keys():
-                    if str(c) == source_client_id:
-                        ws_client = clients.get(c)
-                        break
+                ws_client = clients.get(source_client_id)
                 if ws_client:
                     await ws_client.send(f"{message}")
             else:
-                client = await Client.connect("localhost:7233")
-                await client.start_workflow(
+                workflow_client = await Client.connect("localhost:7233")
+                workflow_id = f"chat-workflow-{client_id}"
+                await workflow_client.start_workflow(
                         "chat-workflow",
                         client_id,
                         id=workflow_id,
