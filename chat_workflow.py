@@ -1,7 +1,12 @@
 from datetime import timedelta
 from temporalio import workflow, activity
 import websockets
-import chatbot_fsm
+import blocks
+
+class ChatParameter:
+    def __init__(self, chat_id, message):
+        self.chat_id = chat_id
+        self.message = message
 
 @activity.defn
 async def bot_reply(message: "str", source_client_id: "str"):
@@ -14,43 +19,64 @@ async def bot_reply(message: "str", source_client_id: "str"):
 @workflow.defn(name="chat-workflow")
 class ChatWorkflow:
     def __init__(self) -> None:
-        self.chat_parameter = chatbot_fsm.ChatParameter(chat_id="", message="")
-        self.chatbot = chatbot_fsm.ChatbotFSM(self.chat_parameter)
+        self.chat_parameter = blocks.ChatParameter(chat_id="", message="")
 
     @workflow.run
     async def run(self, client_id: str) -> str:
         self.chat_parameter.chat_id = client_id
+        self.dialog = blocks.DEFAULT_DIALOG
 
-        await workflow.execute_activity(
-            "bot_reply",
-            args=[self.chatbot.reply, self.chat_parameter.chat_id],
-            start_to_close_timeout=timedelta(seconds=10)
-        )
+        i = 0
+        current_keyword = None
+        while i < len(self.dialog.actions):
+            if isinstance(self.dialog.actions[i], blocks.TextReceiver):
+                await workflow.wait_condition(
+                    lambda: not self.chat_parameter.message == ""
+                )
+                self.dialog.actions[i].parameter.set_received_message(self.chat_parameter.message)
+                current_keyword = self.dialog.actions[i].execute().get_output()
+                i += 1
+                self.chat_parameter.message = ""
+            elif isinstance(self.dialog.actions[i], blocks.Branching):
+                self.dialog.actions[i].parameter.condition_parameter = current_keyword
+                
+                action = self.dialog.actions[i].execute().get_output()
+                while isinstance(action, blocks.Branching):
+                    action.parameter.condition_parameter = current_keyword
+                    action = action.execute().get_output()
 
-        while not self.chatbot.is_completed:
-            self.chat_parameter.message = ""
-            await workflow.wait_condition(
-                lambda: not self.chat_parameter.message == ""
-            )
-            
-            is_transitioning = False
-            for transition in self.chatbot.transitions:
-                if transition['trigger'] == self.chat_parameter.message and transition['source'] == self.chatbot.state:
-                    is_transitioning = True
-                    self.chatbot.trigger(self.chat_parameter.message)
-
-            if not is_transitioning:
+                if isinstance(action, blocks.SendText):
+                    action.parameter.generate_response_parameter = self.chat_parameter
+                    action.execute()
+                    await workflow.execute_activity(
+                        "bot_reply",
+                        args=[action.parameter.message, self.chat_parameter.chat_id],
+                        start_to_close_timeout=timedelta(seconds=10)
+                    )
+                    i += 1
+                elif isinstance(action, blocks.GoToDialog):
+                    self.dialog = action.parameter.dialog
+                    i = 0
+                elif isinstance(self.dialog.actions[i], blocks.Script):
+                    self.dialog.actions[i].parameter.function_parameter = [self.chat_parameter, current_keyword]
+                    self.dialog.actions[i].execute()
+                    i += 1
+            elif isinstance(self.dialog.actions[i], blocks.SendText):
+                self.dialog.actions[i].parameter.generate_response_parameter = self.chat_parameter
+                self.dialog.actions[i].execute()
                 await workflow.execute_activity(
                     "bot_reply",
-                    args=[self.chatbot.unrecognized_option_reply, self.chat_parameter.chat_id],
+                    args=[self.dialog.actions[i].parameter.message, self.chat_parameter.chat_id],
                     start_to_close_timeout=timedelta(seconds=10)
                 )
-            else:
-                await workflow.execute_activity(
-                    "bot_reply",
-                    args=[self.chatbot.reply, self.chat_parameter.chat_id],
-                    start_to_close_timeout=timedelta(seconds=10)
-                )
+                i += 1
+            elif isinstance(self.dialog.actions[i], blocks.GoToDialog):
+                self.dialog = self.dialog.actions[i].parameter.dialog
+                i = 0
+            elif isinstance(self.dialog.actions[i], blocks.Script):
+                self.dialog.actions[i].parameter.function_parameter = [self.chat_parameter, current_keyword]
+                self.dialog.actions[i].execute()
+                i += 1
 
         return "Chat completed"
 
